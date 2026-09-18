@@ -60,6 +60,7 @@ export default function GISMap({ nodes, selectedNode, onSelectNode, activePanel 
     })
   }
 
+  // Determine which panels are "active" for rendering opacity
   const p1Active = activePanel === 'All' || activePanel === 'Panel 1'
   const p2Active = activePanel === 'All' || activePanel === 'Panel 2'
 
@@ -89,11 +90,11 @@ export default function GISMap({ nodes, selectedNode, onSelectNode, activePanel 
       >
         <div className="flex items-center gap-2">
           <span className="text-[11px] font-bold tracking-wider" style={{ fontFamily: 'Space Grotesk, sans-serif', color: colors.accent }}>
-            GIS MAP (3D TERRAIN LAYER)
+            GIS MAP
           </span>
           <span style={{ color: colors.textMuted, fontSize: '10px' }}>—</span>
           <span style={{ color: colors.textMuted, fontFamily: 'IBM Plex Mono, monospace', fontSize: '10px' }}>
-            {activePanel} · Multi-Layer GIS Model
+            {activePanel} · Panel Boundary + Sensor Nodes
           </span>
           {activePanel !== 'All' && (
             <span style={{
@@ -115,36 +116,21 @@ export default function GISMap({ nodes, selectedNode, onSelectNode, activePanel 
         </div>
       </div>
 
-      {/* SVG Realistic Terrain GIS Map */}
+      {/* SVG Mine Map */}
       <div className="flex-1 overflow-hidden relative">
         <svg viewBox="0 0 800 360" className="w-full h-full" style={{ cursor: 'crosshair' }}>
           <defs>
-            {/* Topographic Elevation Contour Texture Pattern */}
-            <pattern id="gis-contours" x="0" y="0" width="80" height="80" patternUnits="userSpaceOnUse">
-              <path d="M 0 20 Q 40 5 80 20 T 160 20" fill="none" stroke={colors.isDark ? 'rgba(255,255,255,0.07)' : 'rgba(0,0,0,0.06)'} strokeWidth="0.8" />
-              <path d="M 0 50 Q 40 35 80 50 T 160 50" fill="none" stroke={colors.isDark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.03)'} strokeWidth="0.6" />
-            </pattern>
-
             <pattern id="gm-grid" x="0" y="0" width="40" height="40" patternUnits="userSpaceOnUse">
-              <path d="M 40 0 L 0 0 0 40" fill="none" stroke={colors.gridStroke} strokeWidth="0.8" strokeDasharray="2,2" />
+              <path d="M 40 0 L 0 0 0 40" fill="none" stroke={colors.gridStroke} strokeWidth="0.8" />
             </pattern>
-
             <radialGradient id="rg-high" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stopColor={RISK_COLOR.HIGH} stopOpacity={colors.isDark ? '0.42' : '0.28'} />
+              <stop offset="0%" stopColor={RISK_COLOR.HIGH} stopOpacity={colors.isDark ? '0.38' : '0.25'} />
               <stop offset="100%" stopColor={RISK_COLOR.HIGH} stopOpacity="0" />
             </radialGradient>
             <radialGradient id="rg-med" cx="50%" cy="50%" r="50%">
-              <stop offset="0%" stopColor={RISK_COLOR.MEDIUM} stopOpacity={colors.isDark ? '0.25' : '0.18'} />
+              <stop offset="0%" stopColor={RISK_COLOR.MEDIUM} stopOpacity={colors.isDark ? '0.22' : '0.18'} />
               <stop offset="100%" stopColor={RISK_COLOR.MEDIUM} stopOpacity="0" />
             </radialGradient>
-
-            {/* Terrain Shading Gradients */}
-            <linearGradient id="terrain-relief" x1="0%" y1="0%" x2="100%" y2="100%">
-              <stop offset="0%" stopColor={colors.isDark ? '#121824' : '#E2E8F0'} stopOpacity="0.9" />
-              <stop offset="50%" stopColor={colors.isDark ? '#0D1117' : '#F1F5F9'} stopOpacity="0.6" />
-              <stop offset="100%" stopColor={colors.isDark ? '#090D12' : '#CBD5E1'} stopOpacity="0.95" />
-            </linearGradient>
-
             <filter id="glow-hi">
               <feGaussianBlur stdDeviation="3.5" result="b" />
               <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
@@ -155,18 +141,29 @@ export default function GISMap({ nodes, selectedNode, onSelectNode, activePanel 
             <marker id="arr-medium" markerWidth="6" markerHeight="6" refX="5" refY="3" orient="auto">
               <path d="M 0 0 L 6 3 L 0 6 z" fill={RISK_COLOR.MEDIUM} />
             </marker>
-          </defs>
+                      <filter id="terrain-noise" x="-20%" y="-20%" width="140%" height="140%">
+              <feTurbulence type="fractalNoise" baseFrequency="0.018" numOctaves="4" seed="12" result="noise"/>
+              <feColorMatrix in="noise" type="matrix" values="0.6 0 0 0 0.16  0 0.5 0 0 0.13  0 0 0.4 0 0.08  0 0 0 1 0"/>
+            </filter>
+            <radialGradient id="terrain-light" cx="35%" cy="25%" r="90%">
+              <stop offset="0%" stop-color="#8A7658"/>
+              <stop offset="45%" stop-color="#5B4A36"/>
+              <stop offset="100%" stop-color="#2A221A"/>
+            </radialGradient>
+            <pattern id="terrain-speckle" width="120" height="120" patternUnits="userSpaceOnUse">
+              <circle cx="22" cy="30" r="10" fill="#7E6B50" opacity="0.16"/>
+              <circle cx="82" cy="74" r="15" fill="#3E352A" opacity="0.22"/>
+              <ellipse cx="56" cy="96" rx="22" ry="8" fill="#9A8766" opacity="0.10"/>
+            </pattern>
+</defs>
 
-          {/* Base realistic terrain canvas */}
-          <rect width="800" height="360" fill="url(#terrain-relief)" />
-          <rect width="800" height="360" fill="url(#gis-contours)" />
-          {layers.grid && <rect width="800" height="360" fill="url(#gm-grid)" />}
-
-          {/* Natural Hillshade / Elevation Ridgelines (Adds 3D relief illusion) */}
-          <g opacity={colors.isDark ? 0.35 : 0.2}>
-            <path d="M 0 80 Q 200 40 400 90 T 800 70" fill="none" stroke={colors.isDark ? '#334155' : '#94A3B8'} strokeWidth="12" filter="blur(6px)" />
-            <path d="M 0 240 Q 300 290 600 230 T 800 260" fill="none" stroke={colors.isDark ? '#020617' : '#64748B'} strokeWidth="16" filter="blur(8px)" />
-          </g>
+          {/* Satellite-style terrain */}
+          <rect width="800" height="360" fill="url(#terrain-light)"/>
+          <rect width="800" height="360" fill="url(#terrain-speckle)" opacity="0.9"/>
+          <rect width="800" height="360" filter="url(#terrain-noise)" opacity="0.45"/>
+          <path d="M 0 80 C 120 50 240 95 340 70 C 450 45 590 100 800 55 L 800 0 L 0 0 Z" fill="#A08B69" opacity="0.18"/>
+          <path d="M 20 230 C 160 185 310 235 420 210 C 560 180 670 250 800 205" fill="none" stroke="#8C785C" stroke-width="24" opacity="0.12" stroke-linecap="round"/>
+          {layers.grid && <rect width="800" height="360" fill="url(#gm-grid)" opacity="0.22"/>}
 
           {/* Coordinate labels */}
           {layers.grid && (
@@ -180,9 +177,9 @@ export default function GISMap({ nodes, selectedNode, onSelectNode, activePanel 
             </g>
           )}
 
-          {/* Topographic Surface Features / Access Roads */}
-          <path d="M 0 335 Q 250 326 500 332 Q 680 337 800 328" fill="none" stroke={colors.roadStroke} strokeWidth="10" opacity="0.85" />
-          <path d="M 55 0 L 62 360" fill="none" stroke={colors.roadStroke} strokeWidth="6" opacity="0.85" />
+          {/* Road/surface features */}
+          <path d="M 0 335 Q 250 326 500 332 Q 680 337 800 328" fill="none" stroke="#B7A07A" strokeWidth="11" opacity="0.75" strokeLinecap="round" />
+          <path d="M 55 0 L 62 360" fill="none" stroke="#C9B28A" strokeWidth="7" opacity="0.65" strokeLinecap="round" />
 
           {/* Panel 1 boundary */}
           <g opacity={p1Opacity} style={{ transition: 'opacity 0.35s ease' }}>
@@ -190,27 +187,27 @@ export default function GISMap({ nodes, selectedNode, onSelectNode, activePanel 
               points="78,88 294,70 318,295 93,310"
               fill={p1Active ? colors.accentBg : 'transparent'}
               stroke={p1Stroke}
-              strokeWidth={p1Active ? 1.8 : 0.8}
-              strokeDasharray="6,4"
+              strokeWidth={p1Active ? 1.6 : 0.8}
+              strokeDasharray="9,5"
             />
-            <text x="155" y="66" fontFamily="Space Grotesk, sans-serif" fontSize="11" fontWeight="700" fill={p1Stroke}>Panel 1 (Depillared)</text>
-            <text x="155" y="78" fontFamily="IBM Plex Mono, monospace" fontSize="8" fill={colors.textMuted}>ELEV: 340m · LOW RISK</text>
+            <text x="155" y="66" fontFamily="Space Grotesk, sans-serif" fontSize="11" fontWeight="700" fill={p1Stroke}>Panel 1</text>
+            <text x="155" y="78" fontFamily="IBM Plex Mono, monospace" fontSize="8" fill={colors.textMuted}>DEPILLARED · 36 mo · LOW RISK</text>
           </g>
 
           {/* Panel 2 boundary */}
           <g opacity={p2Opacity} style={{ transition: 'opacity 0.35s ease' }}>
             <polygon
               points="365,70 648,58 670,312 384,322"
-              fill={p2Active ? (colors.isDark ? 'rgba(179,73,46,0.08)' : 'rgba(220,38,38,0.06)') : 'transparent'}
+              fill={p2Active ? (colors.isDark ? 'rgba(179,73,46,0.05)' : 'rgba(220,38,38,0.05)') : 'transparent'}
               stroke={p2Stroke}
-              strokeWidth={p2Active ? 1.8 : 0.8}
-              strokeDasharray="6,4"
+              strokeWidth={p2Active ? 1.6 : 0.8}
+              strokeDasharray="9,5"
             />
-            <text x="488" y="54" fontFamily="Space Grotesk, sans-serif" fontSize="11" fontWeight="700" fill={p2Stroke}>Panel 2 (Active Extraction)</text>
-            <text x="488" y="66" fontFamily="IBM Plex Mono, monospace" fontSize="8" fill={colors.textMuted}>ELEV: 285m · HIGH RISK</text>
+            <text x="488" y="54" fontFamily="Space Grotesk, sans-serif" fontSize="11" fontWeight="700" fill={p2Stroke}>Panel 2</text>
+            <text x="488" y="66" fontFamily="IBM Plex Mono, monospace" fontSize="8" fill={colors.textMuted}>DEPILLARED · 18 mo · HIGH RISK</text>
           </g>
 
-          {/* Risk subsidence heatmap layer */}
+          {/* Risk heatmap */}
           {layers.heatmap && (
             <>
               {p2Active && <ellipse cx="518" cy="192" rx="148" ry="122" fill="url(#rg-high)" opacity={p2Active ? 1 : 0.1} />}
@@ -223,8 +220,7 @@ export default function GISMap({ nodes, selectedNode, onSelectNode, activePanel 
             <g opacity={p1Opacity} style={{ transition: 'opacity 0.35s ease' }}>
               {PANEL1_PILLARS.map((p, i) => (
                 <rect key={`p1-${i}`} x={p.x - 12} y={p.y - 9} width="24" height="18"
-                  fill={colors.isDark ? 'rgba(76,140,107,0.1)' : 'rgba(21,128,61,0.08)'} 
-                  stroke={RISK_COLOR.LOW} strokeWidth="1" strokeDasharray="2,2" opacity={colors.isDark ? 0.5 : 0.7} />
+                  fill="none" stroke={RISK_COLOR.LOW} strokeWidth="0.8" strokeDasharray="3,2" opacity={colors.isDark ? 0.38 : 0.6} />
               ))}
             </g>
           )}
@@ -234,8 +230,7 @@ export default function GISMap({ nodes, selectedNode, onSelectNode, activePanel 
             <g opacity={p2Opacity} style={{ transition: 'opacity 0.35s ease' }}>
               {PANEL2_PILLARS.map((p, i) => (
                 <rect key={`p2-${i}`} x={p.x - 12} y={p.y - 9} width="24" height="18"
-                  fill={colors.isDark ? 'rgba(179,73,46,0.12)' : 'rgba(220,38,38,0.08)'} 
-                  stroke={i < 18 ? RISK_COLOR.HIGH : RISK_COLOR.MEDIUM} strokeWidth="1" strokeDasharray="2,2" opacity={colors.isDark ? 0.6 : 0.8} />
+                  fill="none" stroke={i < 18 ? RISK_COLOR.HIGH : RISK_COLOR.MEDIUM} strokeWidth="0.8" strokeDasharray="3,2" opacity={colors.isDark ? 0.45 : 0.7} />
               ))}
             </g>
           )}
@@ -250,8 +245,8 @@ export default function GISMap({ nodes, selectedNode, onSelectNode, activePanel 
                 x1={n.gisX} y1={n.gisY}
                 x2={n.gisX + disp * 0.28} y2={n.gisY + disp * 0.22}
                 stroke={RISK_COLOR[n.risk]}
-                strokeWidth="1.8"
-                opacity={active ? 0.9 : 0.1}
+                strokeWidth="1.6"
+                opacity={active ? 0.85 : 0.1}
                 markerEnd={active ? `url(#arr-${n.risk.toLowerCase()})` : undefined}
                 style={{ transition: 'opacity 0.35s ease' }}
               />
@@ -340,7 +335,7 @@ export default function GISMap({ nodes, selectedNode, onSelectNode, activePanel 
             <text x="33" y="13" fontSize="8" fill={colors.textMuted} fontFamily="IBM Plex Mono, monospace">100m</text>
             <text x="70" y="13" fontSize="8" fill={colors.textMuted} fontFamily="IBM Plex Mono, monospace">200m</text>
           </g>
-          <text x="630" y="354" fontSize="8" fill={colors.coordFill} fontFamily="IBM Plex Mono, monospace">UTM Zone 44N · DEM Hillshade Active</text>
+          <text x="650" y="354" fontSize="8" fill={colors.coordFill} fontFamily="IBM Plex Mono, monospace">UTM Zone 44N · WGS84</text>
         </svg>
       </div>
     </div>
