@@ -2,14 +2,87 @@ import { useState, useEffect } from 'react'
 import type { SensorNode } from '../types'
 import { useTheme } from '../context/ThemeContext'
 
-// Geological strata (depth from surface in SVG pixels, surface starts at y=22 in the drawing area)
+/* ------------------------------------------------------------------ *
+ * Geological strata
+ * depth values are SVG px measured down from the surface (SY).
+ * Scale: 24px = 25m (matches the depth axis), so ~1.04 m per px.
+ * Each layer carries a top->bottom gradient, a procedural grain
+ * filter, an overlay texture pattern, and 2-4 internal sub-bands so
+ * it reads as deposited sediment rather than a flat fill.
+ * ------------------------------------------------------------------ */
 const STRATA = [
-  { label: 'Topsoil', from: 0, to: 16, fillDark: '#8B7660', fillLight: '#A38F79' },
-  { label: 'Alluvium', from: 16, to: 40, fillDark: '#9E8B72', fillLight: '#BDB09E' },
-  { label: 'Sandstone', from: 40, to: 82, fillDark: '#7D6A55', fillLight: '#A89680', striped: true },
-  { label: 'Shale', from: 82, to: 108, fillDark: '#5C514A', fillLight: '#8C7F77' },
-  { label: 'Coal Seam', from: 108, to: 138, fillDark: '#1C1814', fillLight: '#2C2723' },
-  { label: 'Mudstone', from: 138, to: 178, fillDark: '#4A3F3A', fillLight: '#786C66' },
+  {
+    label: 'TOPSOIL',
+    note: 'O/A horizon',
+    from: 0, to: 15,
+    light: ['#5F4028', '#7A5936', '#4C331F'],
+    dark: ['#372416', '#4A3220', '#2A1B10'],
+    texture: 'organic',
+    grain: 'fine',
+    wave: 1.3,
+    seed: 0.4,
+    bands: 3,
+  },
+  {
+    label: 'ALLUVIUM',
+    note: 'gravel · subsoil',
+    from: 15, to: 40,
+    light: ['#8F7350', '#A88E68', '#7A6244'],
+    dark: ['#5E4C34', '#6E5A3D', '#4A3B28'],
+    texture: 'gravel',
+    grain: 'coarse',
+    wave: 2.6,
+    seed: 1.7,
+    bands: 3,
+  },
+  {
+    label: 'SANDSTONE',
+    note: 'aquifer',
+    from: 40, to: 82,
+    light: ['#C2A473', '#D3B686', '#B39561', '#C7AA78'],
+    dark: ['#83693F', '#93794C', '#735B34', '#886E43'],
+    texture: 'sand',
+    grain: 'medium',
+    wave: 3,
+    seed: 2.9,
+    bands: 5,
+  },
+  {
+    label: 'SHALE',
+    note: 'laminated',
+    from: 82, to: 108,
+    light: ['#66605A', '#767068', '#524C46'],
+    dark: ['#463F3A', '#524B45', '#37312C'],
+    texture: 'shale',
+    grain: 'fine',
+    wave: 2.2,
+    seed: 4.1,
+    bands: 4,
+  },
+  {
+    label: 'COAL SEAM',
+    note: 'worked',
+    from: 108, to: 138,
+    light: ['#1B1614', '#242019', '#0E0B09'],
+    dark: ['#120E0C', '#1A1512', '#070504'],
+    texture: 'coal',
+    grain: 'fine',
+    wave: 1.7,
+    seed: 5.3,
+    bands: 3,
+  },
+  {
+    label: 'MUDSTONE',
+    note: 'floor',
+    from: 138, to: 178,
+    light: ['#6F5340', '#7F614C', '#5C4433'],
+    dark: ['#4C3729', '#5A4232', '#3B2A1F'],
+    texture: 'mud',
+    grain: 'medium',
+    wave: 2,
+    seed: 6.6,
+    bands: 3,
+  },
 ]
 
 // Pillars: x is their SVG x position (content starts at x=32, runs 768px wide)
@@ -26,6 +99,13 @@ const PILLARS = [
 const CX = 32     // content x start
 const CW = 768    // content width
 const SY = 22     // surface y (top of strata)
+const MAXD = 178  // deepest drawn depth
+const STEPS = 96  // boundary resolution
+const MPX = 25 / 24 // metres per SVG pixel
+
+// Subsidence trough spans the Panel 2 zone
+const P2_START = CX + 0.38 * CW
+const P2_END   = CX + 0.88 * CW
 
 interface Props {
   nodes: SensorNode[]
@@ -55,24 +135,101 @@ export default function CrossSection({ nodes, selectedNode, activePanel }: Props
     return () => clearTimeout(t)
   }, [sagAmt, hasHigh])
 
+  /* --------------------------------------------------------------- *
+   * Geometry helpers
+   * --------------------------------------------------------------- */
+
+  // Bell-shaped trough profile across the mined-out span (0..1)
+  function sagProfile(x: number) {
+    if (x <= P2_START - 30 || x >= P2_END + 30) return 0
+    const t = (x - (P2_START - 30)) / ((P2_END + 30) - (P2_START - 30))
+    return 0.5 * (1 - Math.cos(2 * Math.PI * t))
+  }
+
+  // Strata above the worked seam sag; the floor below it does not.
+  function sagDamping(depth: number) {
+    if (depth <= 108) return 1 - (depth / 108) * 0.28
+    if (depth >= 138) return 0
+    return 0.72 * (1 - (depth - 108) / 30)
+  }
+
+  function sagAt(x: number, depth: number) {
+    return sagProfile(x) * sagAmt * sagDamping(depth)
+  }
+
+  // An irregular (non-straight) bedding boundary at a given depth.
+  // Four octaves of sine noise at different frequencies/phases give an
+  // eroded, unconformity-like contact instead of a smooth wave.
+  function boundary(depth: number, amp: number, seed: number) {
+    const pts: string[] = []
+    for (let i = 0; i <= STEPS; i++) {
+      const t = i / STEPS
+      const x = CX + CW * t
+      const wob =
+        Math.sin(t * 6.2 + seed) * amp * 0.42 +
+        Math.sin(t * 14.5 + seed * 1.9) * amp * 0.28 +
+        Math.sin(t * 33 + seed * 3.1) * amp * 0.16 +
+        Math.sin(t * 61 + seed * 5.7) * amp * 0.09
+      const y = SY + depth + wob + sagAt(x, depth)
+      pts.push(`${x.toFixed(1)} ${y.toFixed(1)}`)
+    }
+    return pts
+  }
+
+  function layerPath(s: typeof STRATA[number]) {
+    const top = boundary(s.from, s.wave, s.seed)
+    const bot = boundary(s.to, s.wave, s.seed + 0.9).reverse()
+    return `M ${top.join(' L ')} L ${bot.join(' L ')} Z`
+  }
+
+  // Top of the topsoil = ground surface, reused for the highlight line + grass
+  const surfacePts = boundary(0, STRATA[0].wave, STRATA[0].seed)
+  const surfaceLine = `M ${surfacePts.join(' L ')}`
+
+  function surfaceYAt(x: number) {
+    const t = (x - CX) / CW
+    const s = STRATA[0]
+    const wob =
+      Math.sin(t * 6.2 + s.seed) * s.wave * 0.42 +
+      Math.sin(t * 14.5 + s.seed * 1.9) * s.wave * 0.28 +
+      Math.sin(t * 33 + s.seed * 3.1) * s.wave * 0.16 +
+      Math.sin(t * 61 + s.seed * 5.7) * s.wave * 0.09
+    return SY + wob + sagAt(x, 0)
+  }
+
   // Compute sensor node SVG positions — filter by active panel
   const csNodes = nodes
     .filter(n => activePanel === 'All' || n.panel === activePanel)
-    .map(n => ({
-      ...n,
-      svgX: CX + n.csX * CW,
-      sagY: n.risk === 'HIGH' ? sagAmt * 0.86 : 0,
-    }))
+    .map(n => {
+      const svgX = CX + n.csX * CW
+      return { ...n, svgX, groundY: surfaceYAt(svgX) }
+    })
 
-  // Surface path: flat for Panel 1 zone, sagging for Panel 2 zone
-  const p2Start = CX + 0.38 * CW  // ~323
-  const p2End   = CX + 0.88 * CW  // ~707
-  const sagMid  = (p2Start + p2End) / 2
-  const surfaceD = sagAmt < 2
-    ? `M ${CX} ${SY} L ${CX + CW} ${SY} L ${CX + CW} ${SY + 16} L ${CX} ${SY + 16} Z`
-    : `M ${CX} ${SY} L ${p2Start - 20} ${SY} Q ${p2Start + 30} ${SY + sagAmt * 0.4} ${sagMid} ${SY + sagAmt} Q ${p2End - 30} ${SY + sagAmt * 0.4} ${p2End + 20} ${SY} L ${CX + CW} ${SY} L ${CX + CW} ${SY + 16} Q ${p2End - 30} ${SY + 16 + sagAmt * 0.4} ${sagMid} ${SY + 16 + sagAmt} Q ${p2Start + 30} ${SY + 16 + sagAmt * 0.4} ${p2Start - 20} ${SY + 16} L ${CX} ${SY + 16} Z`
+  const sagMid = (P2_START + P2_END) / 2
+  const sagMidY = surfaceYAt(sagMid)
+
+  /* --------------------------------------------------------------- *
+   * Palette values shared across textures
+   * --------------------------------------------------------------- */
+  const grassA = colors.isDark ? '#3E6437' : '#4E8235'
+  const grassB = colors.isDark ? '#5A8348' : '#6FA348'
+  const grassC = colors.isDark ? '#2E4E29' : '#3B6428'
+  const waterCol = colors.isDark ? '#6FA8DC' : '#2F7FD1'
+  const rockLine = colors.isDark ? '#E4D6B8' : '#FFF6E2'
+  const pebbleLt = colors.isDark ? '#C4B191' : '#E9D7AF'
+  const pebbleDk = colors.isDark ? '#332A20' : '#4E3D27'
 
   const panelHeight = expanded ? 240 : 172
+
+  // Grass tuft positions along the surface (irregular spacing feels less mechanical)
+  const tufts: number[] = []
+  { let x = CX + 6; let i = 0
+    while (x < CX + CW - 4) { tufts.push(x); x += 12 + ((i * 37) % 11); i++ } }
+
+  // Scattered surface pebbles/clumps between tufts
+  const clumps: number[] = []
+  { let x = CX + 14; let i = 0
+    while (x < CX + CW - 8) { clumps.push(x); x += 26 + ((i * 53) % 19); i++ } }
 
   return (
     <div
@@ -123,9 +280,102 @@ export default function CrossSection({ nodes, selectedNode, activePanel }: Props
           preserveAspectRatio="xMidYMid meet"
         >
           <defs>
-            <pattern id="cs-stripe" x="0" y="0" width="7" height="4" patternUnits="userSpaceOnUse">
-              <line x1="0" y1="2" x2="7" y2="2" stroke="#9A8268" strokeWidth="0.6" opacity="0.4" />
+            {/* Per-layer vertical gradients (multi-stop for banded sediment look) */}
+            {STRATA.map(s => {
+              const stops = colors.isDark ? s.dark : s.light
+              return (
+                <linearGradient key={`g-${s.label}`} id={`cs-g-${s.texture}`} x1="0" y1="0" x2="0" y2="1">
+                  {stops.map((c, i) => (
+                    <stop key={i} offset={`${(i / (stops.length - 1)) * 100}%`} stopColor={c} />
+                  ))}
+                </linearGradient>
+              )
+            })}
+
+            {/* Procedural grain noise — one per grain size, reused across layers */}
+            <filter id="cs-noise-fine" x="-5%" y="-5%" width="110%" height="110%">
+              <feTurbulence type="fractalNoise" baseFrequency="0.9 0.35" numOctaves="2" seed="7" result="n" />
+              <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0.9 0.9 0.9 0 -0.55" result="a" />
+              <feComponentTransfer in="a" result="a2"><feFuncA type="linear" slope="0.5" /></feComponentTransfer>
+              <feBlend in="SourceGraphic" in2="a2" mode="multiply" />
+            </filter>
+            <filter id="cs-noise-medium" x="-5%" y="-5%" width="110%" height="110%">
+              <feTurbulence type="fractalNoise" baseFrequency="0.35 0.18" numOctaves="3" seed="14" result="n" />
+              <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1 1 1 0 -0.5" result="a" />
+              <feComponentTransfer in="a" result="a2"><feFuncA type="linear" slope="0.55" /></feComponentTransfer>
+              <feBlend in="SourceGraphic" in2="a2" mode="multiply" />
+            </filter>
+            <filter id="cs-noise-coarse" x="-5%" y="-5%" width="110%" height="110%">
+              <feTurbulence type="fractalNoise" baseFrequency="0.14 0.09" numOctaves="3" seed="21" result="n" />
+              <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  1.1 1.1 1.1 0 -0.45" result="a" />
+              <feComponentTransfer in="a" result="a2"><feFuncA type="linear" slope="0.6" /></feComponentTransfer>
+              <feBlend in="SourceGraphic" in2="a2" mode="multiply" />
+            </filter>
+
+            {/* Organic topsoil: root threads + humus specks */}
+            <pattern id="cs-tx-organic" width="26" height="15" patternUnits="userSpaceOnUse">
+              <path d="M4 0 C5 5 3 8 6 14" fill="none" stroke="#170D06" strokeWidth="0.5" opacity="0.4" />
+              <path d="M17 1 C15 6 19 9 16 15" fill="none" stroke="#170D06" strokeWidth="0.4" opacity="0.32" />
+              <path d="M23 2 C22 6 24 9 21 14" fill="none" stroke="#170D06" strokeWidth="0.35" opacity="0.24" />
+              <circle cx="10" cy="5" r="0.7" fill="#0B0603" opacity="0.45" />
+              <circle cx="22" cy="9" r="0.6" fill="#0B0603" opacity="0.4" />
+              <circle cx="13" cy="12" r="0.5" fill={rockLine} opacity="0.2" />
+              <circle cx="2" cy="7" r="0.45" fill={rockLine} opacity="0.16" />
             </pattern>
+
+            {/* Alluvium: rounded gravel clasts with a highlight + shadow edge for a 3-D pebble look */}
+            <pattern id="cs-tx-gravel" width="32" height="24" patternUnits="userSpaceOnUse">
+              {[
+                [6, 6, 3.1, 2.3], [19, 4, 2, 1.5], [27, 12, 2.6, 1.9],
+                [12, 15, 3.4, 2.3], [2, 19, 2.1, 1.5], [23, 20, 2.4, 1.6], [30, 3, 1.1, 0.9],
+              ].map(([cx, cy, rx, ry], i) => (
+                <g key={i}>
+                  <ellipse cx={cx} cy={cy} rx={rx} ry={ry} fill={i % 2 ? pebbleDk : pebbleLt} opacity="0.5" />
+                  <ellipse cx={cx - rx * 0.3} cy={cy - ry * 0.3} rx={rx * 0.35} ry={ry * 0.25} fill={rockLine} opacity="0.28" />
+                  <path d={`M ${cx - rx} ${cy + ry * 0.2} A ${rx} ${ry} 0 0 0 ${cx + rx * 0.6} ${cy + ry * 0.8}`} fill="none" stroke="#000" strokeWidth="0.4" opacity="0.22" />
+                </g>
+              ))}
+            </pattern>
+
+            {/* Sandstone: cross-bedding sweeps (Liesegang-style curves) + grain stipple */}
+            <pattern id="cs-tx-sand" width="46" height="16" patternUnits="userSpaceOnUse">
+              <path d="M0 12 Q11 5 23 11 T46 10" fill="none" stroke={pebbleDk} strokeWidth="0.5" opacity="0.34" />
+              <path d="M0 5 Q13 1 25 6 T46 4" fill="none" stroke={rockLine} strokeWidth="0.45" opacity="0.24" />
+              <path d="M0 15 Q10 10 22 14 T46 13" fill="none" stroke={pebbleDk} strokeWidth="0.35" opacity="0.2" />
+              {[[5,7],[14,12],[24,6],[33,12],[37,7],[42,14],[9,3],[29,3]].map(([cx,cy],i)=>(
+                <circle key={i} cx={cx} cy={cy} r={i%2?0.4:0.5} fill={i%3===0?rockLine:pebbleDk} opacity={i%3===0?0.3:0.4} />
+              ))}
+            </pattern>
+
+            {/* Shale: fine fissile laminations, slightly offset per band for a sheared look */}
+            <pattern id="cs-tx-shale" width="38" height="7" patternUnits="userSpaceOnUse">
+              <line x1="0" y1="1.4" x2="24" y2="1.1" stroke="#050403" strokeWidth="0.45" opacity="0.4" />
+              <line x1="26" y1="1.2" x2="38" y2="1.6" stroke="#050403" strokeWidth="0.45" opacity="0.32" />
+              <line x1="0" y1="3.6" x2="16" y2="3.9" stroke={rockLine} strokeWidth="0.32" opacity="0.14" />
+              <line x1="18" y1="3.7" x2="38" y2="3.5" stroke="#050403" strokeWidth="0.4" opacity="0.3" />
+              <line x1="2" y1="5.8" x2="30" y2="6.1" stroke="#050403" strokeWidth="0.35" opacity="0.22" />
+            </pattern>
+
+            {/* Coal: vitreous conchoidal sheen + cleat joints */}
+            <pattern id="cs-tx-coal" width="28" height="18" patternUnits="userSpaceOnUse">
+              <path d="M0 14 L28 5" stroke="#C7BFAE" strokeWidth="0.5" opacity="0.18" />
+              <path d="M0 4 L28 16" stroke="#C7BFAE" strokeWidth="0.35" opacity="0.11" />
+              <path d="M6 0 L20 18" stroke="#C7BFAE" strokeWidth="0.3" opacity="0.08" />
+              <line x1="9" y1="0" x2="9" y2="18" stroke="#000000" strokeWidth="0.6" opacity="0.55" />
+              <line x1="22" y1="0" x2="22" y2="18" stroke="#000000" strokeWidth="0.5" opacity="0.42" />
+              <circle cx="15" cy="10" r="0.6" fill="#E0D8C6" opacity="0.2" />
+              <circle cx="4" cy="9" r="0.4" fill="#E0D8C6" opacity="0.14" />
+            </pattern>
+
+            {/* Mudstone: mottled blocky clay peds */}
+            <pattern id="cs-tx-mud" width="30" height="22" patternUnits="userSpaceOnUse">
+              <ellipse cx="7" cy="6" rx="5.4" ry="3.2" fill="#000000" opacity="0.14" />
+              <ellipse cx="22" cy="15" rx="6.4" ry="3.6" fill="#000000" opacity="0.12" />
+              <ellipse cx="18" cy="3" rx="3.6" ry="2" fill={rockLine} opacity="0.09" />
+              <path d="M0 18 Q10 16 19 19 T30 17" fill="none" stroke="#000000" strokeWidth="0.4" opacity="0.2" />
+              <path d="M0 9 Q8 7 15 9" fill="none" stroke="#000000" strokeWidth="0.3" opacity="0.14" />
+            </pattern>
+
             <filter id="cs-glow">
               <feGaussianBlur stdDeviation="2" result="b" />
               <feMerge><feMergeNode in="b" /><feMergeNode in="SourceGraphic" /></feMerge>
@@ -145,32 +395,94 @@ export default function CrossSection({ nodes, selectedNode, activePanel }: Props
             ))}
           </g>
 
-          {/* Strata background */}
-          {STRATA.map(s => (
-            <g key={s.label} clipPath="url(#cs-clip)">
-              <rect x={CX} y={SY + s.from} width={CW} height={s.to - s.from} fill={colors.isDark ? s.fillDark : s.fillLight} />
-              {s.striped && (
-                <rect x={CX} y={SY + s.from} width={CW} height={s.to - s.from} fill="url(#cs-stripe)" />
-              )}
-              <text
-                x={CX + 6}
-                y={SY + s.from + (s.to - s.from) / 2 + 3}
-                fontSize="7"
-                fontFamily="IBM Plex Mono, monospace"
-                fontWeight="600"
-                fill={colors.isDark ? 'rgba(237,230,218,0.35)' : 'rgba(15,23,42,0.45)'}
-              >
-                {s.label.toUpperCase()}
-              </text>
-            </g>
-          ))}
+          {/* ---------------- Strata ---------------- */}
+          <g clipPath="url(#cs-clip)">
+            {STRATA.map(s => {
+              const d = layerPath(s)
+              // internal sub-bedding lines within the layer, spaced by its band count
+              const subLines = []
+              for (let b = 1; b < s.bands; b++) {
+                const depth = s.from + ((s.to - s.from) * b) / s.bands
+                subLines.push(
+                  <path
+                    key={`sub-${s.label}-${b}`}
+                    d={`M ${boundary(depth, s.wave * 0.7, s.seed + b * 0.37).join(' L ')}`}
+                    fill="none"
+                    stroke={colors.isDark ? 'rgba(0,0,0,0.22)' : 'rgba(0,0,0,0.14)'}
+                    strokeWidth="0.5"
+                  />
+                )
+              }
+              return (
+                <g key={s.label}>
+                  {/* base sediment colour */}
+                  <path d={d} fill={`url(#cs-g-${s.texture})`} />
+                  {/* procedural grain noise, clipped to this layer's own shape */}
+                  <clipPath id={`clip-${s.texture}`}><path d={d} /></clipPath>
+                  <g clipPath={`url(#clip-${s.texture})`}>
+                    <rect x={CX} y={SY + s.from - 4} width={CW} height={s.to - s.from + 8} fill={`url(#cs-g-${s.texture})`} filter={`url(#cs-noise-${s.grain})`} />
+                  </g>
+                  {/* internal bedding bands */}
+                  {subLines}
+                  {/* decorative overlay texture (pebbles/laminae/cleats) */}
+                  <path d={d} fill={`url(#cs-tx-${s.texture})`} />
+                  {/* contact shadow: soft dark line under the boundary for depth */}
+                  <path
+                    d={`M ${boundary(s.to, s.wave, s.seed + 0.9).join(' L ')}`}
+                    fill="none"
+                    stroke={colors.isDark ? 'rgba(0,0,0,0.6)' : 'rgba(0,0,0,0.45)'}
+                    strokeWidth="0.9"
+                  />
+                  <path
+                    d={`M ${boundary(s.to, s.wave, s.seed + 0.9).join(' L ')}`}
+                    fill="none"
+                    stroke={rockLine}
+                    strokeWidth="0.4"
+                    opacity="0.18"
+                    transform="translate(0,-1)"
+                  />
+                </g>
+              )
+            })}
+          </g>
+
+          {/* ---------------- Water table in the sandstone aquifer ---------------- */}
+          <g clipPath="url(#cs-clip)" opacity="0.85">
+            <path
+              d={`M ${boundary(64, 1.6, 8.2).join(' L ')}`}
+              fill="none"
+              stroke={waterCol}
+              strokeWidth="1"
+              strokeDasharray="5,3"
+              opacity="0.8"
+            />
+            <ellipse cx={CX + 120} cy={SY + 70} rx="16" ry="2.4" fill={waterCol} opacity="0.3" />
+            <ellipse cx={CX + 330} cy={SY + 73} rx="22" ry="2.6" fill={waterCol} opacity="0.26" />
+            <ellipse cx={CX + 600} cy={SY + 69} rx="18" ry="2.2" fill={waterCol} opacity="0.28" />
+            <text
+              x={CX + 6} y={SY + 61}
+              fontSize="6.5"
+              fontFamily="IBM Plex Mono, monospace"
+              fontWeight="600"
+              fill={waterCol}
+            >
+              WATER TABLE
+            </text>
+          </g>
 
           {/* Mined-out goaf */}
           <rect
             x={CX + 80} y={SY + 110}
             width={CW - 140} height="22"
-            fill={colors.isDark ? '#080604' : '#1E1B18'}
-            opacity={colors.isDark ? '0.82' : '0.90'}
+            fill={colors.isDark ? '#050403' : '#161311'}
+            opacity={colors.isDark ? '0.85' : '0.92'}
+            clipPath="url(#cs-clip)"
+          />
+          <rect
+            x={CX + 80} y={SY + 110}
+            width={CW - 140} height="22"
+            fill="url(#cs-tx-coal)"
+            opacity="0.5"
             clipPath="url(#cs-clip)"
           />
           <text
@@ -233,21 +545,35 @@ export default function CrossSection({ nodes, selectedNode, activePanel }: Props
             )
           })}
 
-          {/* Surface layer (animated) */}
+          {/* ---------------- Ground surface detail: pebbles + vegetation ---------------- */}
+          <g clipPath="url(#cs-clip)">
+            {clumps.map((x, i) => {
+              const y = surfaceYAt(x)
+              return i % 4 === 0 ? (
+                <ellipse key={`peb-${x}`} cx={x} cy={y + 0.6} rx="1.3" ry="0.8" fill={pebbleDk} opacity="0.5" />
+              ) : null
+            })}
+            {tufts.map((x, i) => {
+              const y = surfaceYAt(x)
+              const h = 3 + ((i * 17) % 5)
+              const col = i % 3 === 0 ? grassC : i % 3 === 1 ? grassA : grassB
+              return (
+                <g key={`tuft-${x}`} stroke={col} strokeWidth="0.7" strokeLinecap="round" fill="none" opacity="0.95">
+                  <path d={`M ${x} ${y} Q ${x - 1.7} ${y - h * 0.6} ${x - 2.8} ${y - h}`} />
+                  <path d={`M ${x} ${y} L ${x + 0.2} ${y - h - 1}`} />
+                  <path d={`M ${x} ${y} Q ${x + 1.9} ${y - h * 0.55} ${x + 2.9} ${y - h * 0.95}`} />
+                </g>
+              )
+            })}
+          </g>
+
+          {/* Ground surface line */}
           <path
-            d={surfaceD}
-            fill={colors.isDark ? '#8B7660' : '#A38F79'}
-            style={{ transition: 'd 0.6s ease-in-out' }}
-            clipPath="url(#cs-clip)"
-          />
-          {/* Surface highlight line */}
-          <path
-            d={`M ${CX} ${SY} ${sagAmt < 2 ? `L ${CX + CW} ${SY}` : `L ${p2Start - 20} ${SY} Q ${p2Start + 30} ${SY + sagAmt * 0.4} ${(p2Start + p2End) / 2} ${SY + sagAmt} Q ${p2End - 30} ${SY + sagAmt * 0.4} ${p2End + 20} ${SY} L ${CX + CW} ${SY}`}`}
+            d={surfaceLine}
             fill="none"
-            stroke={colors.accent}
-            strokeWidth="1.2"
-            opacity="0.8"
-            style={{ transition: 'd 0.6s ease-in-out' }}
+            stroke={colors.isDark ? '#6FA348' : '#3F6B2B'}
+            strokeWidth="1.3"
+            opacity="0.9"
             clipPath="url(#cs-clip)"
           />
 
@@ -255,17 +581,23 @@ export default function CrossSection({ nodes, selectedNode, activePanel }: Props
           {sagAmt > 5 && (
             <g>
               <line
-                x1={(p2Start + p2End) / 2 + 4}
-                y1={SY}
-                x2={(p2Start + p2End) / 2 + 4}
-                y2={SY + sagAmt}
+                x1={sagMid + 4} y1={SY}
+                x2={sagMid + 4} y2={sagMidY}
                 stroke={RISK_COLOR.HIGH}
                 strokeWidth="1.2"
                 strokeDasharray="3,2"
               />
+              <line
+                x1={sagMid - 26} y1={SY}
+                x2={sagMid + 26} y2={SY}
+                stroke={RISK_COLOR.HIGH}
+                strokeWidth="0.7"
+                strokeDasharray="2,2"
+                opacity="0.7"
+              />
               <text
-                x={(p2Start + p2End) / 2 + 8}
-                y={SY + sagAmt * 0.5 + 4}
+                x={sagMid + 8}
+                y={(SY + sagMidY) / 2 + 3}
                 fontSize="8"
                 fontWeight="700"
                 fontFamily="IBM Plex Mono, monospace"
@@ -276,25 +608,59 @@ export default function CrossSection({ nodes, selectedNode, activePanel }: Props
             </g>
           )}
 
+          {/* ---------------- Layer labels (right side, readable on any fill) ---------------- */}
+          <g clipPath="url(#cs-clip)" fontFamily="IBM Plex Mono, monospace">
+            {STRATA.map(s => {
+              const mid = SY + s.from + (s.to - s.from) / 2
+              const d0 = Math.round(s.from * MPX)
+              const d1 = Math.round(s.to * MPX)
+              const tall = s.to - s.from >= 24
+              return (
+                <g key={`lbl-${s.label}`}>
+                  <rect
+                    x={CX + CW - 104} y={mid - (tall ? 9 : 5.5)}
+                    width="98" height={tall ? 18 : 11}
+                    rx="2"
+                    fill="rgba(8,6,4,0.55)"
+                  />
+                  <text
+                    x={CX + CW - 10} y={mid + (tall ? -1 : 3)}
+                    textAnchor="end"
+                    fontSize="6.8"
+                    fontWeight="700"
+                    fill="#F3EBDD"
+                    letterSpacing="0.4"
+                  >
+                    {s.label} · {d0}–{d1}m
+                  </text>
+                  {tall && (
+                    <text
+                      x={CX + CW - 10} y={mid + 7}
+                      textAnchor="end"
+                      fontSize="6"
+                      fill="rgba(243,235,221,0.65)"
+                    >
+                      {s.note}
+                    </text>
+                  )}
+                </g>
+              )
+            })}
+          </g>
+
           {/* Sensor nodes above surface */}
           {csNodes.map(n => {
             const col = RISK_COLOR[n.risk]
             const isSelected = selectedNode === n.id
-            const nodeY = SY - 26 + n.sagY
+            const nodeY = n.groundY - 26
             return (
               <g
                 key={`csn-${n.id}`}
                 transform={`translate(${n.svgX}, ${nodeY})`}
-                style={{ transition: 'transform 0.6s ease-in-out' }}
+                style={{ transition: 'transform 0.4s ease-in-out' }}
               >
                 {/* Stem to surface */}
-                <line
-                  x1="0" y1="0" x2="0"
-                  y2={20 - n.sagY}
-                  stroke={col}
-                  strokeWidth="1.2"
-                  opacity="0.6"
-                />
+                <line x1="0" y1="0" x2="0" y2="22" stroke={col} strokeWidth="1.2" opacity="0.6" />
                 {/* Marker */}
                 <circle
                   r={isSelected ? 7 : 5}
